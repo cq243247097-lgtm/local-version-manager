@@ -1,0 +1,55 @@
+{
+  "dateUTC": "2026-09-30",
+  "evidence": "NEW EXECUTION after filesystem recovery; not restored old report bytes",
+  "scope": "Linux code/API/temporary-fixture candidate, not final browser or Windows acceptance",
+  "environment": {
+    "node": "v24.19.0",
+    "git": "2.52.0",
+    "os": "Linux 6.18.44 x86_64"
+  },
+  "head": "bfb4c1c6448ed23971723599c3b6bf2804abbedf",
+  "branch": "dot/p3-local-commit",
+  "nonbrowser": {
+    "tests": 466,
+    "pass": 466,
+    "fail": 0,
+    "skip": 0,
+    "suites": 37,
+    "durationMs": 38989.134771
+  },
+  "excludedBrowserScenarios": {
+    "P2": 4,
+    "P3": 8,
+    "P4": 1,
+    "total": 13
+  },
+  "integration": {
+    "integration": "PASS",
+    "registration": true,
+    "installerUpgradeAssociation": true,
+    "selectedCommit": true,
+    "unselectedIndexPreserved": true,
+    "idempotenceRestart": true,
+    "baselineNoneAndMatch": true,
+    "archivePublishedDuplicateConflict": true,
+    "cancelBeforeStart": true,
+    "protectedRoots": true,
+    "historicalNotFresh": true,
+    "unavailableRootRecoveryReadOnly": true,
+    "sourceAndP2RecordsPreserved": true
+  },
+  "filterProbe": {
+    "rejected": "FILTER_UNSUPPORTED",
+    "candidateFilterRan": false,
+    "readRejected": "FILTER_UNSUPPORTED",
+    "readOnlyFilterRan": false
+  },
+  "sourceTestsUnchanged": true,
+  "originalGitMetadataUnchanged": true,
+  "syntaxChecks": "PASS",
+  "diffWhitespace": "PASS",
+  "windows": "NOT_EXECUTED",
+  "browser": "NOT_EXECUTED_KNOWN_BLOCKED",
+  "publication": "NOT_PERFORMED_BY_REVIEWER",
+  "recommendation": "READY_FOR_USER_ACCEPTANCE_CONDITIONAL"
+}

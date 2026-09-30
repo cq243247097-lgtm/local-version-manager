@@ -434,11 +434,13 @@ async function initRealMode() {
   $('#demo-banner').classList.add('real-banner');
   $('#project-selector-wrapper').style.display = 'flex';
   $('#btn-refresh-real').style.display = 'inline-block';
+  $('#recover-material-operation').hidden = false;
 
   await reloadProjectsList();
 }
 
 async function reloadProjectsList(selectId = null) {
+  closeMaterialOperation();
   closeCommitDialog();
   const listSerial = ++realActiveRequestSerial; // 配置列表重载时废弃尚未完成的旧项目读取
   ++realActiveMaterialSerial; // 同时废弃旧材料清单请求
@@ -554,6 +556,7 @@ function renderEmptyWorkspace() {
 }
 
 function renderReal() {
+  $('#recover-material-operation').hidden = state.view === 'source';
   document.querySelectorAll('[data-view]').forEach((button) => {
     if (button.dataset.view === state.view) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
@@ -582,7 +585,7 @@ function renderReal() {
     const isInstaller = state.view === 'installer';
     const kindText = isInstaller ? '安装包' : '升级包';
     $('#demo-banner').className = 'demo-banner real-banner';
-    $('#demo-banner').innerHTML = `<strong>真实只读工作台 · ${kindText}资料库</strong><span>只读扫描已关联${kindText}目录；本地材料零修改、零执行。</span>`;
+    $('#demo-banner').innerHTML = `<strong>真实本地工作台 · ${kindText}资料库</strong><span>默认只读扫描；确认后可校验单文件或复制归档，保留源文件、不覆盖、不执行安装。</span>`;
     $('#help-text').textContent = isInstaller
       ? '文件存在 ≠ 安装可用。历史验证记录仅供参考，本次未核验当前文件。'
       : '兼容性仅基于直接支持声明；各包独立计算最低来源，不是实测结论。';
@@ -734,6 +737,7 @@ function formatInstallationResult(record) {
 }
 
 async function loadRealMaterial(projectId, kind) {
+  closeMaterialOperation();
   if (!projectId) return false;
   const reqSerial = ++realActiveMaterialSerial;
   currentMaterialKind = kind;
@@ -1022,7 +1026,8 @@ function realInstallerDetail(item) {
         <span>${formatInstallationResult(item.installationRecord)}</span>
       </li>
     </ul>
-    <p class="caption"><strong>说明：</strong>历史记录称通过，本次未核验当前文件。本工具仅执行有界只读扫描，不执行可执行程序、不计算包哈希，不改变材料文件。</p>
+    <p class="caption"><strong>说明：</strong>历史记录称通过，本次未核验当前文件。目录扫描仅探测属性；单文件摘要校验与非覆盖归档需另行确认，不运行安装或升级。</p>
+    ${materialOperationControls(item)}
     <div class="actions">
       <button id="btn-relink-from-detail" class="button">更换关联目录</button>
       <button id="btn-refresh-from-detail" class="button">重新扫描 ↻</button>
@@ -1146,7 +1151,8 @@ function realUpgradeDetail(item) {
         <span>${formatInstallationResult(item.installationRecord)}</span>
       </li>
     </ul>
-    <p class="caption"><strong>说明：</strong>历史记录称通过，本次未核验当前文件。本工具仅执行有界只读扫描，不执行可执行程序、不计算包哈希，不改变材料文件。</p>
+    <p class="caption"><strong>说明：</strong>历史记录称通过，本次未核验当前文件。目录扫描仅探测属性；单文件摘要校验与非覆盖归档需另行确认，不运行安装或升级。</p>
+    ${materialOperationControls(item)}
     <div class="actions">
       <button id="btn-relink-from-detail" class="button">更换关联目录</button>
       <button id="btn-refresh-from-detail" class="button">重新扫描 ↻</button>
@@ -1155,6 +1161,7 @@ function realUpgradeDetail(item) {
 }
 
 function openMaterialDialog(kind) {
+  closeMaterialOperation();
   if (!currentProjectId) {
     notify('请先接入或选择项目！');
     return;
@@ -1330,6 +1337,157 @@ function renderMaterialDialog() {
     });
   }
 }
+
+// P4 single-file operations: explicit preview, durable identity, read-only recovery.
+let materialOperationView = null;
+let materialOperationSerial = 0;
+const materialOperationKey = (projectId, kind) => `lvm_material_operation_v1:${projectId}:${kind}`;
+function savedMaterialOperation(projectId, kind) {
+  try { const id = localStorage.getItem(materialOperationKey(projectId, kind)); return /^[a-zA-Z0-9_-]{1,64}$/.test(id || '') && !['preview', 'confirm'].includes(id) ? id : null; } catch { return null; }
+}
+function materialOperationCurrent(view) {
+  return isRealMode && materialOperationView === view && view.serial === materialOperationSerial && view.projectId === currentProjectId && view.kind === state.view && view.associationSerial === realActiveMaterialSerial;
+}
+function closeMaterialOperation() {
+  ++materialOperationSerial;
+  materialOperationView = null;
+  $('#material-operation-dialog')?.close();
+}
+function materialOperationControls(item) {
+  return `<div class="actions"><button class="button" data-material-operation="integrity" ${!item.physical.exists ? 'disabled' : ''}>校验单文件完整性</button><button class="button" data-material-operation="archive" ${!item.physical.exists ? 'disabled' : ''}>预览非覆盖归档</button></div><p class="caption">操作需单独预览并确认；保留源文件，不覆盖已有目标。不运行安装或升级。</p>`;
+}
+async function materialOperationRequest(view, action, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 65000);
+  try {
+    return await apiFetch(`/api/projects/${encodeURIComponent(view.projectId)}/materials/${encodeURIComponent(view.kind)}/operations/${action}`, {
+      signal: controller.signal,
+      ...(body !== undefined ? { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Local-Intent': 'material-operations' }, body: JSON.stringify(body) } : {}),
+    });
+  } finally { clearTimeout(timer); }
+}
+function materialOperationResultHtml(result) {
+  const status = { running: '正在处理', completed: '本次流程已结束', partial: '部分完成，需核对归档事实', unknown: '结果未知，请查询原操作', not_started: '查询时尚无持久记录；先前确认仍可能稍后开始，请继续查询原操作' };
+  const integrity = { matched: '上次校验与明确采用的基准一致', mismatched: '摘要不匹配：与基准不同', no_baseline: '无可信基准：仅计算摘要，未验证真伪', changed: '文件或关联已变化，未验证通过', unreadable: '文件不可读，未验证通过', cancelled: '校验已取消，未验证通过', timeout: '校验超时，未验证通过', limit_exceeded: '文件超过上限，未验证通过' };
+  const archive = { published: '已发布归档副本；源文件保留', duplicate: '已有相同内容，未覆盖目标', conflict: '目标内容冲突，未覆盖目标', not_published: '未发布归档副本', unavailable: '目标不可用', unknown: '归档影响未知，可能已发布，请核对目标' };
+  // Defense in depth: never infer a match from a lone digest or completion status.
+  const trustedMatch = result.integrity === 'matched' && /^[a-f0-9]{64}$/i.test(result.baseline?.sha256 || '') && result.sha256?.toLowerCase() === result.baseline.sha256.toLowerCase();
+  const integrityText = result.integrity === 'matched' && !trustedMatch ? '校验依据不足，结果未知' : integrity[result.integrity] || '完整性结果待核对';
+  return `<div class="state-notice" role="status">${escapeHtml(status[result.status] || '结果未知，请查询原操作')}</div>
+    ${result.relativePath ? `<p>文件：<code>${escapeHtml(result.relativePath)}</code></p>` : ''}
+    <p>${escapeHtml(integrityText)}</p>${result.sha256 ? `<p class="operation-digest">计算摘要：<code>${escapeHtml(result.sha256)}</code></p>` : ''}
+    ${result.baseline ? `<p>采用基准：<code>${escapeHtml(result.baseline.sha256)}</code><br>来源：${escapeHtml(result.baseline.source)}</p>` : ''}
+    ${result.archive ? `<p>${escapeHtml(archive[result.archive.state] || archive.unknown)}</p>${result.archive.stagingRetained ? '<p>暂存内容可能保留；不会自动清理。</p>' : ''}` : ''}
+    <p>上次校验时间：${result.checkedAt ? escapeHtml(formatTimestamp(result.checkedAt)) : '尚无可核实时间'}。查询不会重新计算摘要，历史结果不证明当前文件未改变。</p>
+    ${result.associationCurrent === false ? '<p class="error">材料关联已改变，此结果属于原关联。</p>' : ''}
+    <p class="caption">安装/升级验证与完整性独立：本次没有运行安装或升级，不更改历史记录或兼容声明。</p>`;
+}
+function renderMaterialOperation() {
+  const view = materialOperationView;
+  if (!view || !materialOperationCurrent(view)) return;
+  let html = `<p>项目：${escapeHtml(view.projectId)} · ${view.kind === 'installer' ? '安装包' : '升级包'}</p>`;
+  if (view.phase === 'input') {
+    html += `<p>单文件：<code>${escapeHtml(view.relativePath)}</code></p><label class="field">可信基准<select id="operation-baseline" ${view.busy ? 'disabled' : ''}><option value="none">无基准（默认）：仅计算摘要</option>${view.declared ? '<option value="declared">明确采用历史登记摘要</option>' : ''}<option value="manual">手动输入可信 SHA-256 与来源</option></select></label>
+      ${view.declared ? `<p class="caption">可采用的历史摘要：<code>${escapeHtml(view.declared.sha256)}</code><br>来源：${escapeHtml(view.declared.source)}。只有主动选择才会采用。</p>` : ''}
+      <label class="field">手动 SHA-256<input id="operation-sha" maxlength="64" autocomplete="off" ${view.busy ? 'disabled' : ''}></label><label class="field">手动基准来源<input id="operation-source" maxlength="512" autocomplete="off" ${view.busy ? 'disabled' : ''}></label>
+      ${view.action === 'archive' ? '<label class="field">本机已存在的归档目录（绝对路径）<input id="operation-target" maxlength="4096" autocomplete="off"></label><p>复制到所选目录，文件名保持源文件名；保留源文件，不删除、不覆盖。</p>' : ''}
+      <button id="preview-material-operation" class="button primary" ${view.busy ? 'disabled' : ''}>${view.busy ? '正在核对预览…' : '预览操作'}</button>`;
+  } else if (view.phase === 'review') {
+    const p = view.preview;
+    html += `<h3>${view.action === 'archive' ? '确认非覆盖归档' : '确认完整性校验'}</h3><p>源文件（已关联材料目录内）：<code>${escapeHtml(p.relativePath)}</code> · ${formatBytes(p.bytes)}</p>
+      <p>${p.baseline ? `明确采用基准：<code>${escapeHtml(p.baseline.sha256)}</code><br>来源：${escapeHtml(p.baseline.source)}` : '无可信基准：仅计算摘要，不会显示已验证通过。'}</p>
+      ${view.action === 'archive' ? `<p>目标目录：<code>${escapeHtml(view.targetRoot)}</code><br>目标文件名：<code>${escapeHtml(p.basename)}</code></p><p>保留源文件。相同内容视为重复，不同内容视为冲突；一律不覆盖。${p.targetExists ? '预览时目标已存在。' : '预览时目标不存在。'}</p>` : ''}
+      <p class="caption">单文件上限 1 GiB，运行预算 60 秒。预览后源文件、关联或目标改变需重新预览。</p><button id="confirm-material-operation" class="button primary" ${view.busy ? 'disabled' : ''}>确认${view.action === 'archive' ? '复制归档' : '校验'}</button><button id="back-material-operation" class="button">返回修改（废弃预览）</button>`;
+  } else {
+    html += materialOperationResultHtml(view.result || { status: 'unknown' });
+    html += `<p class="caption">操作 ID：<code>${escapeHtml(view.operationId)}</code></p><button id="query-material-operation" class="button" ${view.querying ? 'disabled' : ''}>${view.querying ? '正在查询…' : '查询原操作结果'}</button>
+      <button id="cancel-material-operation" class="button" ${view.cancelling || view.result?.status === 'completed' ? 'disabled' : ''}>请求取消原操作</button>
+      <p class="caption">取消为协作式请求，可能已经发布归档；以查询事实为准。关闭窗口不会取消操作。只支持进程退出后的结果核对，不保证断电恢复。</p>`;
+  }
+  if (view.notice) html += `<p role="status">${escapeHtml(view.notice)}</p>`;
+  if (view.error) html += `<p class="error" role="alert">${escapeHtml(view.error)}</p>`;
+  html += `<div class="actions"><button id="close-material-operation" class="button">${view.operationId ? '关闭（保留原操作查询）' : '取消，不执行'}</button></div>`;
+  $('#material-operation-body').innerHTML = html;
+}
+function openMaterialOperation(action, recover = false) {
+  if (!isRealMode || !currentProjectId || !['installer', 'upgrade'].includes(state.view)) return;
+  const saved = savedMaterialOperation(currentProjectId, state.view);
+  if (recover && !saved) { notify('当前项目和材料种类没有保存的操作 ID。'); return; }
+  const item = currentMaterialData?.items?.find(it => it.id === selectedMaterialItemId) || currentMaterialData?.items?.[0];
+  if (!recover && (!item?.physical.exists || currentMaterialData.projectId !== currentProjectId || currentMaterialData.kind !== state.view)) return;
+  closeMaterialOperation();
+  const d = item?.declaration;
+  const declared = /^[a-f0-9]{64}$/i.test(d?.recordedFile?.sha256 || '') && d.state === 'available' ? { sha256: d.recordedFile.sha256, source: `历史登记 ${d.sourceOrigin || '材料记录'} 第 ${(d.recordIndex || 0) + 1} 条${d.evidenceSource ? ` · ${d.evidenceSource}` : ''}`.slice(0, 512) } : null;
+  materialOperationView = { projectId: currentProjectId, kind: state.view, associationSerial: realActiveMaterialSerial, serial: ++materialOperationSerial, phase: recover ? 'result' : 'input', action, relativePath: item?.relativePath, declared, operationId: recover ? saved : null, saved };
+  renderMaterialOperation();
+  $('#material-operation-dialog').showModal();
+  if (recover) void queryMaterialOperation(materialOperationView);
+}
+async function previewMaterialOperation() {
+  const view = materialOperationView;
+  if (!view || !materialOperationCurrent(view) || view.phase !== 'input' || view.busy) return;
+  const choice = $('#operation-baseline').value;
+  const baseline = choice === 'declared' ? view.declared : choice === 'manual' ? { sha256: $('#operation-sha').value.trim(), source: $('#operation-source').value.trim() } : null;
+  if (choice !== 'none' && (!baseline || !/^[a-f0-9]{64}$/i.test(baseline.sha256) || !baseline.source || /[\x00-\x1f\x7f]/.test(baseline.source))) { view.error = '请输入 64 位 SHA-256 和非空来源说明。'; renderMaterialOperation(); return; }
+  view.targetRoot = view.action === 'archive' ? $('#operation-target').value.trim() : undefined;
+  if (view.action === 'archive' && !view.targetRoot) { view.error = '请输入本机已存在的归档目录。'; renderMaterialOperation(); return; }
+  view.busy = true; view.error = null; renderMaterialOperation();
+  const response = await materialOperationRequest(view, 'preview', { action: view.action, relativePath: view.relativePath, ...(baseline ? { baseline } : {}), ...(view.targetRoot ? { targetRoot: view.targetRoot } : {}) });
+  if (!materialOperationCurrent(view)) return;
+  view.busy = false;
+  const p = response.data;
+  if (!response.ok || p?.projectId !== view.projectId || p?.kind !== view.kind || p?.action !== view.action || p?.relativePath !== view.relativePath || !p?.ticketId) view.error = '无法取得安全预览，请核对文件、基准和目录后重试。';
+  else { view.preview = p; view.phase = 'review'; }
+  renderMaterialOperation();
+}
+async function queryMaterialOperation(view = materialOperationView) {
+  if (!view || !materialOperationCurrent(view) || !view.operationId || view.querying) return;
+  view.querying = true; view.error = null; renderMaterialOperation();
+  const response = await materialOperationRequest(view, encodeURIComponent(view.operationId));
+  if (!materialOperationCurrent(view)) return;
+  view.querying = false;
+  const r = response.data;
+  if (r?.projectId === view.projectId && r?.kind === view.kind && r?.operationId === view.operationId && ['running', 'completed', 'partial', 'unknown', 'not_started'].includes(r.status)) view.result = r;
+  else { view.result = { status: 'unknown' }; view.error = '无法核对结果。请恢复本机连接后查询同一操作 ID；不要重新发起复制。'; }
+  renderMaterialOperation();
+}
+async function confirmMaterialOperation() {
+  const view = materialOperationView;
+  if (!view || !materialOperationCurrent(view) || view.phase !== 'review' || view.busy || view.operationId) return;
+  // Never overwrite a pending identity: resolve the previous operation before starting another.
+  if (view.saved) {
+    view.busy = true;
+    const old = await materialOperationRequest(view, encodeURIComponent(view.saved));
+    if (!materialOperationCurrent(view)) return;
+    view.busy = false;
+    if (old.data?.projectId !== view.projectId || old.data?.kind !== view.kind || old.data?.operationId !== view.saved || old.data?.status !== 'completed') {
+      view.operationId = view.saved; view.phase = 'result'; view.notice = '仍有原操作需核对，未发起新操作。'; await queryMaterialOperation(view); return;
+    }
+  }
+  const operationId = window.crypto.randomUUID();
+  try { localStorage.setItem(materialOperationKey(view.projectId, view.kind), operationId); if (savedMaterialOperation(view.projectId, view.kind) !== operationId) throw new Error(); }
+  catch { view.error = '无法保存恢复用操作 ID，已阻止执行。请允许本站本地存储。'; renderMaterialOperation(); return; }
+  view.operationId = operationId; view.phase = 'result'; view.result = { status: 'running' }; view.busy = true; renderMaterialOperation();
+  const ticketId = view.preview.ticketId; view.preview = null;
+  await materialOperationRequest(view, 'confirm', { ticketId, operationId });
+  if (!materialOperationCurrent(view)) return;
+  view.busy = false;
+  await queryMaterialOperation(view);
+}
+async function cancelMaterialOperation() {
+  const view = materialOperationView;
+  if (!view || !materialOperationCurrent(view) || !view.operationId || view.cancelling) return;
+  view.cancelling = true; view.notice = '正在请求取消；可能已经发布，必须核对最终事实。'; renderMaterialOperation();
+  const response = await materialOperationRequest(view, `${encodeURIComponent(view.operationId)}/cancel`, {});
+  if (!materialOperationCurrent(view)) return;
+  view.cancelling = false;
+  view.notice = response.data?.cancellation?.requested ? '已请求协作式取消，不保证立即停止；归档可能已发布。' : '取消请求未能确认，请查询原操作。';
+  await queryMaterialOperation(view);
+}
+$('#material-operation-dialog')?.addEventListener('cancel', closeMaterialOperation);
+window.addEventListener('popstate', closeMaterialOperation);
+window.addEventListener('pagehide', closeMaterialOperation);
+// End P4 single-file operations.
 
 // Selected-files local commit. Tickets live only in this view; operation IDs survive navigation.
 let commitView = null;
@@ -2066,7 +2224,7 @@ document.addEventListener('click', (event) => {
 
   // 视图切换
   if (button.dataset.view) {
-    if (isRealMode) closeCommitDialog();
+    if (isRealMode) { closeCommitDialog(); closeMaterialOperation(); }
     state.view = button.dataset.view;
     if (isRealMode) renderReal();
     else renderDemo();
@@ -2097,6 +2255,14 @@ document.addEventListener('click', (event) => {
 
   // 真实模式专属操作
   if (isRealMode) {
+    if (button.dataset.materialOperation) { openMaterialOperation(button.dataset.materialOperation); return; }
+    if (button.id === 'recover-material-operation') { openMaterialOperation(null, true); return; }
+    if (button.id === 'preview-material-operation') { void previewMaterialOperation(); return; }
+    if (button.id === 'confirm-material-operation') { void confirmMaterialOperation(); return; }
+    if (button.id === 'query-material-operation') { void queryMaterialOperation(); return; }
+    if (button.id === 'cancel-material-operation') { void cancelMaterialOperation(); return; }
+    if (button.id === 'close-material-operation') { closeMaterialOperation(); return; }
+    if (button.id === 'back-material-operation' && materialOperationView && !materialOperationView.busy) { materialOperationView.preview = null; materialOperationView.phase = 'input'; renderMaterialOperation(); return; }
     if (button.id === 'open-real-commit' || button.id === 'retry-commit-candidates') { void openRealCommit(); return; }
     if (button.id === 'preview-real-commit') { void previewRealCommit(); return; }
     if (button.id === 'confirm-real-commit') { void confirmRealCommit(); return; }
@@ -2106,6 +2272,7 @@ document.addEventListener('click', (event) => {
     if (button.id === 'new-real-commit' && !commitView?.busy && ['completed', 'stale', 'not_started'].includes(commitView?.result?.status)) { void openRealCommit({ fresh: true }); return; }
     // 材料条目选择
     if (button.dataset.materialItem !== undefined) {
+      closeMaterialOperation();
       selectedMaterialItemId = button.dataset.materialItem;
       renderReal();
       return;
@@ -2200,6 +2367,7 @@ $('#project-select')?.addEventListener('change', (e) => {
   closeCommitDialog();
   ++realActiveRequestSerial;
   ++realActiveMaterialSerial;
+  closeMaterialOperation();
   currentProjectId = newId;
   sessionStorage.setItem('selected_project_id', currentProjectId);
   updateTopbarBreadcrumb();

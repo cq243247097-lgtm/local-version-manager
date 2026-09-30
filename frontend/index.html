@@ -29,6 +29,7 @@
         </div>
       </div>
       <div class="topbar-right">
+        <button id="recover-material-operation" class="button" hidden>查询上次材料操作</button>
         <button id="btn-refresh-real" class="button" title="重新读取本地 Git 状态">刷新状态 ↻</button>
         <button id="reset" class="button">重置演示</button>
       </div>
@@ -53,6 +54,7 @@
     <div id="material-dialog-body"></div>
   </dialog>
   <dialog id="commit-dialog" class="onboard-dialog commit-dialog" aria-labelledby="real-commit-title"><div class="dialog-top"><h2 id="real-commit-title">选择文件并本地提交</h2></div><div id="commit-dialog-body"></div></dialog>
+  <dialog id="material-operation-dialog" class="onboard-dialog material-operation-dialog" aria-labelledby="material-operation-title"><div class="dialog-top"><h2 id="material-operation-title">单文件材料操作</h2></div><div id="material-operation-body"></div></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

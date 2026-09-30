@@ -14,6 +14,27 @@ export class GitError extends Error {
   }
 }
 
+/** Reject executable conversion drivers from all effective config scopes.
+ * `config` itself does not inspect/convert working-tree content. NUL framing
+ * preserves newlines in config values and avoids parsing human-readable output.
+ */
+export function assertNoConfiguredFilters(configBytes) {
+  const effective = new Map();
+  for (const entry of configBytes.toString('utf8').split('\0')) {
+    const separator = entry.indexOf('\n');
+    if (separator < 0) continue;
+    const key = entry.slice(0, separator);
+    if (/^filter\..*\.(clean|process)$/i.test(key)) {
+      effective.set(key, entry.slice(separator + 1));
+    }
+  }
+  for (const command of effective.values()) {
+    if (command.trim()) {
+      throw new GitError('FILTER_UNSUPPORTED', '当前 Git 配置包含外部 clean/process 过滤程序，暂不支持安全执行', 400);
+    }
+  }
+}
+
 /**
  * 检查路径是否存在且为目录
  * @param {string} dirPath 
@@ -40,8 +61,17 @@ export async function assertDirectoryExists(dirPath) {
  * @returns {Promise<Buffer>}
  */
 export async function runGit(args, options = {}) {
-  const timeoutMs = options.timeoutMs || DEFAULT_GIT_TIMEOUT_MS;
-  const maxOutputBytes = options.maxOutputBytes || DEFAULT_GIT_MAX_OUTPUT_BYTES;
+  let timeoutMs = options.timeoutMs || DEFAULT_GIT_TIMEOUT_MS;
+  let maxOutputBytes = options.maxOutputBytes || DEFAULT_GIT_MAX_OUTPUT_BYTES;
+  if (args[0] !== 'config') {
+    const started = Date.now();
+    const config = await runGit(['config', '--includes', '--null', '--list'], options);
+    assertNoConfiguredFilters(config);
+    timeoutMs -= Date.now() - started;
+    maxOutputBytes -= config.length;
+    if (timeoutMs <= 0) throw new GitError('GIT_TIMEOUT', 'Git 安全检查超时', 500);
+    if (maxOutputBytes <= 0) throw new GitError('GIT_OUTPUT_LIMIT', 'Git 安全检查输出超出限制', 500);
+  }
 
   if (options.cwd) {
     try {

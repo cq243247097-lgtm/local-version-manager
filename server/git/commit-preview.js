@@ -4,7 +4,7 @@ import fsSync from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { GitError, assertDirectoryExists } from './exec.js';
+import { GitError, assertDirectoryExists, assertNoConfiguredFilters } from './exec.js';
 
 export const COMMIT_PREVIEW_ERRORS = {
   HEAD_DETACHED: 'HEAD_DETACHED',
@@ -102,8 +102,21 @@ export function clearAllCommitPreviewTickets() {
  * @returns {Promise<{ stdout: Buffer, stderr: Buffer, code: number }>}
  */
 export async function runPreviewGit(args, options = {}) {
-  const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
-  const maxOutputBytes = options.maxOutputBytes || DEFAULT_MAX_OUTPUT_BYTES;
+  let timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+  let maxOutputBytes = options.maxOutputBytes || DEFAULT_MAX_OUTPUT_BYTES;
+  if (args[0] !== 'config') {
+    const started = Date.now();
+    // Configuration reads must never inherit content intended for hash-object,
+    // check-attr or update-index: git config closes stdin without consuming it.
+    const { stdin: _contentInput, ...configOptions } = options;
+    const config = await runPreviewGit(['config', '--includes', '--null', '--list'], configOptions);
+    if (config.code !== 0) throw new GitError('GIT_READ_FAILED', '无法安全读取 Git 配置', 500);
+    assertNoConfiguredFilters(config.stdout);
+    timeoutMs -= Date.now() - started;
+    maxOutputBytes -= config.stdout.length + config.stderr.length;
+    if (timeoutMs <= 0) throw new GitError('GIT_TIMEOUT', 'Git 安全检查超时', 500);
+    if (maxOutputBytes <= 0) throw new GitError('GIT_OUTPUT_LIMIT', 'Git 安全检查输出超出限制', 500);
+  }
 
   const isConfigCommand = args[0] === 'config';
   const gitArgs = [
@@ -164,6 +177,7 @@ export async function runPreviewGit(args, options = {}) {
     let totalBytes = 0;
     let timedOut = false;
     let exceededLimit = false;
+    let stdinError;
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -215,6 +229,11 @@ export async function runPreviewGit(args, options = {}) {
         return;
       }
 
+      if (stdinError && code === 0) {
+        reject(new GitError('GIT_READ_FAILED', 'Git 未能完整接收命令输入', 500));
+        return;
+      }
+
       resolve({
         code,
         stdout: Buffer.concat(stdoutChunks),
@@ -223,6 +242,9 @@ export async function runPreviewGit(args, options = {}) {
     });
 
     if (options.stdin !== undefined && options.stdin !== null) {
+      // Early child exit can close the input pipe; classify it after close
+      // rather than allowing an unhandled EPIPE to terminate the API process.
+      child.stdin.on('error', (error) => { stdinError = error; });
       child.stdin.end(options.stdin);
     }
   });
@@ -369,11 +391,8 @@ export async function assertRepositoryAndSecurity(repositoryPath) {
     }
   }
 
-  // 3.5 clean/filter 外部程序配置 (检查本地配置)
-  const filterCleanRes = await runPreviewGit(['config', '--local', '--get-regexp', '^filter\\..*\\.clean$'], { cwd: normalizedTopLevel });
-  if (filterCleanRes.code === 0 && filterCleanRes.stdout.toString('utf-8').trim() !== '') {
-    throw new GitError(COMMIT_PREVIEW_ERRORS.FILTER_UNSUPPORTED, '当前仓库配置了外部 clean/filter 程序，首版不支持外部过滤程序', 400);
-  }
+  // 3.5 Every non-config command is guarded by effective clean/process
+  // configuration checks in runPreviewGit, before status or content hashing.
 
   // 3.6 稀疏检出
   const sparseRes = await runPreviewGit(['config', '--bool', '--get', 'core.sparseCheckout'], { cwd: normalizedTopLevel });
