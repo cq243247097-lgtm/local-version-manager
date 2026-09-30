@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="app-mode" content="preview">
+  <title>版本管理 · 工作台</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">◇</span>版本管理</div>
+    <nav aria-label="功能区域">
+      <button data-view="source" aria-current="page"><span class="nav-icon">&lt;/&gt;</span>源码区域</button>
+      <button data-view="installer"><span class="nav-icon">▣</span>安装包区域</button>
+      <button data-view="upgrade"><span class="nav-icon">⇧</span>升级包区域</button>
+    </nav>
+    <div class="sidebar-foot" id="sidebar-foot"><span class="dot"></span> <span id="mode-text">演示模式</span><small id="mode-sub">仅用于体验 · 无真实操作</small></div>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div class="topbar-left">
+        <span id="project-breadcrumb">进销存 <span class="separator">/</span> <strong>本地版本管理</strong></span>
+        <div id="project-selector-wrapper" class="project-selector-wrapper">
+          <select id="project-select" aria-label="选择项目"></select>
+          <button id="btn-open-onboard" class="button" title="接入新的本地 Git 仓库">+ 接入已有项目</button>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-refresh-real" class="button" title="重新读取本地 Git 状态">刷新状态 ↻</button>
+        <button id="reset" class="button">重置演示</button>
+      </div>
+    </header>
+    <div id="demo-banner" class="demo-banner"><strong>演示数据</strong><span>所有操作仅在当前页面模拟，刷新后恢复；未连接真实仓库和文件。</span></div>
+    <div id="page"></div>
+    <footer class="help"><span><strong>新手提示</strong>　<span id="help-text"></span></span><button id="guide" class="text-button">看懂这些状态 →</button></footer>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-top"><h2 id="dialog-title"></h2><button id="close-dialog" class="button" aria-label="关闭弹窗">关闭</button></div><div id="dialog-body"></div></dialog>
+  <dialog id="onboard-dialog" aria-labelledby="onboard-dialog-title" class="onboard-dialog">
+    <div class="dialog-top">
+      <h2 id="onboard-dialog-title">接入已有本地项目</h2>
+      <button id="close-onboard-dialog" class="button" aria-label="关闭向导">关闭</button>
+    </div>
+    <div id="onboard-dialog-body"></div>
+  </dialog>
+  <dialog id="material-dialog" aria-labelledby="material-dialog-title" class="onboard-dialog material-dialog">
+    <div class="dialog-top">
+      <h2 id="material-dialog-title">关联材料目录</h2>
+      <button id="close-material-dialog" class="button" aria-label="关闭向导">关闭</button>
+    </div>
+    <div id="material-dialog-body"></div>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

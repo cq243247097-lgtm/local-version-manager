@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "records": [
+    {
+      "kind": "upgrade",
+      "file": "upgrade-rc9-to-c4-20260924-d/inventory-ai-v0.2.6-upgrade-rc9-to-c4-d.zip",
+      "targetVersion": "0.2.6",
+      "revision": null,
+      "sourceCommit": null,
+      "releaseStatus": "candidate",
+      "evidenceSource": "upgrade-rc9-to-c4-20260924-d/release-record.json",
+      "directFrom": null,
+      "recordedFile": {
+        "sizeBytes": 5779379,
+        "sha256": "35798a02b314cac9b7049a7b71d9b39a968117f5931788ae4b71db92598a0291"
+      }
+    }
+  ]
+}

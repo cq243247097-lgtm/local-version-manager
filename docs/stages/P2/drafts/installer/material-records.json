@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "records": [
+    {
+      "kind": "installer",
+      "file": "install-v0.2.6-r2-fix1/inventory-ai-v0.2.6-installer-r2-fix1.zip",
+      "targetVersion": "0.2.6",
+      "revision": "r2-fix1",
+      "sourceCommit": null,
+      "releaseStatus": "candidate",
+      "evidenceSource": "install-v0.2.6-r2-fix1/release-record.json",
+      "recordedFile": {
+        "sizeBytes": 827978577,
+        "sha256": "f6a65fb6b81845d61a2dfdf1b1f2888bfb4ab5448f00d8cbc5a6bf4691c88acc"
+      }
+    },
+    {
+      "kind": "installer",
+      "file": "install-0.2.6-c4-20260926-r2/inventory-ai-v0.2.6-installer-r2.zip",
+      "targetVersion": "0.2.6",
+      "revision": "r2",
+      "sourceCommit": null,
+      "releaseStatus": "candidate",
+      "evidenceSource": "install-0.2.6-c4-20260926-r2/release-record.json",
+      "recordedFile": {
+        "sizeBytes": 827962406,
+        "sha256": "3729c4eaf73e82a7f6591b7b4bd155b18f82a9b2a1e6de190adbbcf08f0c2d11"
+      }
+    }
+  ]
+}
