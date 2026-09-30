@@ -35,3 +35,6 @@ body{min-width:1000px}
 .tree-empty-padding{padding:14px 10px}
 
 
+
+/* Local commit review uses the existing PC dialog and panel design. */
+.commit-dialog{width:min(760px,calc(100vw - 64px));max-height:85vh;overflow:auto}.commit-candidates{max-height:280px;overflow:auto;border:1px solid var(--line,#ddd);border-radius:8px;margin:12px 0}.commit-candidate{display:flex;gap:12px;padding:12px;border-bottom:1px solid var(--line,#eee);align-items:flex-start}.commit-candidate input{width:18px;height:18px;flex-shrink:0;margin:2px 0}.commit-candidate span{min-width:0}.commit-candidate code,.commit-files code,.commit-oid{overflow-wrap:anywhere;white-space:normal}.commit-candidate small{display:block;margin-top:4px;color:var(--muted,#666)}.commit-message-label{display:block;margin:12px 0 6px}#real-commit-message{width:100%;padding:10px;border:1px solid var(--line,#ccc);border-radius:6px;font:inherit}.commit-files{max-height:230px;overflow:auto;padding-left:22px}.commit-files li{margin:8px 0}.commit-dialog p{line-height:1.6}

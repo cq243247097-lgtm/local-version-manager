@@ -209,3 +209,139 @@ describe('P1-T04: 前端服务与模式隔离测试', () => {
 });
 
 
+
+
+describe('P3-T04: 真实本地提交入口与模式边界', () => {
+  test('独立提交 dialog、主动选择、服务器预览及结果查询齐备', async () => {
+    const code = await fs.readFile(path.resolve('frontend/app.js'), 'utf8');
+    const html = await fs.readFile(path.resolve('frontend/index.html'), 'utf8');
+    assert.ok(html.includes('id="commit-dialog"'));
+    for (const marker of ['open-real-commit', 'data-commit-candidate', 'preview-real-commit', 'confirm-real-commit', 'query-real-commit', 'refresh-commit-source']) assert.ok(code.includes(marker), marker);
+    assert.ok(code.includes('selected: new Set()'));
+    assert.ok(code.includes("'X-Local-Intent': 'git-commit'"));
+    assert.ok(code.includes('localStorage.setItem(commitOperationKey(view.projectId), operationId)'));
+    assert.ok(code.includes('await queryRealCommit(view, response.data)'));
+    assert.ok(code.includes('view.projectId === currentProjectId'));
+    assert.ok(code.includes('结果未知，需要核对'));
+    assert.ok(code.includes('只有选择文件、核对预览并明确确认后才会本地提交'));
+    assert.ok(code.includes('if (isRealMode) return; // 真实模式严禁触发模拟提交'));
+  });
+});
+
+// Execute the real commit state machine with transport/DOM boundaries stubbed.
+// These are unit tests, not browser or repository-write evidence.
+import vm from 'node:vm';
+async function commitHarness(responder) {
+  const source = await fs.readFile(path.resolve('frontend/app.js'), 'utf8');
+  const fragment = source.slice(source.indexOf('// Selected-files local commit.'), source.indexOf('function realSourcePage()'));
+  const controls = new Map();
+  const storage = new Map();
+  const calls = [];
+  const context = vm.createContext({
+    isRealMode: true, currentProjectId: 'one', realProjects: [{ id: 'one', name: 'One' }],
+    escapeHtml: value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])), currentProjectData: {},
+    $: (selector) => { if (!controls.has(selector)) controls.set(selector, { open: true, innerHTML: '', addEventListener() {}, close() { this.open = false; }, showModal() { this.open = true; } }); return controls.get(selector); },
+    localStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
+    crypto: { randomUUID: () => 'fixed-test-operation' }, AbortController, setTimeout, clearTimeout,
+    loadRealProject: async () => true,
+    apiFetch: async (url, options) => { calls.push({ url, options }); return responder(url, options); },
+  });
+  vm.runInContext(fragment, context);
+  vm.runInContext("commitView = { serial: commitSerial, projectId: 'one', phase: 'preview', preview: { ticketId: 'a'.repeat(64), projectId: 'one', branch: 'main', message: 'one', summary: { fileCount: 1, operations: [] }, expiresInSeconds: 300 }, selected: new Set(), busy: false };", context);
+  return { run: (code) => vm.runInContext(code, context), calls, storage, controls };
+}
+
+describe('P3-T04: 提交状态机单元验证（不代替浏览器）', () => {
+  test('确认响应本身不证明成功，必须查询同一个原操作 ID', async () => {
+    const h = await commitHarness(async (url) => url.endsWith('/confirm')
+      ? { ok: true, data: { status: 'completed', commitOid: 'a'.repeat(40) } }
+      : { ok: false, data: { error: { code: 'NETWORK_ERROR' } } });
+    await h.run('confirmRealCommit()');
+    assert.equal(h.run('commitView.result.status'), 'unknown');
+    assert.equal(h.calls.length, 2);
+    assert.ok(h.calls[1].url.endsWith('/operations/op_fixed-test-operation'));
+    assert.equal(h.storage.get('lvm_commit_operation_v1:one'), 'op_fixed-test-operation');
+  });
+  test('双击确认仅发出一次写请求，查询已核实结果', async () => {
+    let resolve;
+    const pending = new Promise(r => { resolve = r; });
+    const h = await commitHarness(async (url) => url.endsWith('/confirm') ? pending : { ok: true, data: { projectId: 'one', operationId: 'op_fixed-test-operation', status: 'completed', commitOid: 'a'.repeat(40), branch: 'main' } });
+    const first = h.run('confirmRealCommit()');
+    await h.run('confirmRealCommit()');
+    assert.equal(h.calls.length, 1);
+    resolve({ ok: true, data: { status: 'completed' } }); await first;
+    assert.equal(h.run('commitView.result.status'), 'completed');
+    assert.equal(h.calls.filter(c => c.url.endsWith('/confirm')).length, 1);
+  });
+  test('PREVIEW_STALE 加原操作不存在才释放旧票据，不自动再提交', async () => {
+    const h = await commitHarness(async url => url.endsWith('/confirm')
+      ? { ok: false, data: { status: 'stale', operationId: 'op_fixed-test-operation' } }
+      : { ok: false, data: { error: { code: 'OPERATION_NOT_FOUND' } } });
+    await h.run('confirmRealCommit()');
+    assert.equal(h.run('commitView.result.status'), 'stale');
+    assert.equal(h.run('commitView.preview'), null);
+    assert.equal(h.storage.has('lvm_commit_operation_v1:one'), false);
+    assert.equal(h.calls.length, 2);
+  });
+  test('切换项目后晚到响应不能覆盖新页面，原 ID 保留', async () => {
+    let resolve;
+    const h = await commitHarness(() => new Promise(r => { resolve = r; }));
+    const promise = h.run('confirmRealCommit()');
+    h.run("closeCommitDialog(); currentProjectId = 'two';");
+    resolve({ ok: true, data: { status: 'completed' } }); await promise;
+    assert.equal(h.run('commitView'), null);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.storage.get('lvm_commit_operation_v1:one'), 'op_fixed-test-operation');
+  });
+  test('结果刷新失败保留已核实 OID，后续查询断线不改成失败', async () => {
+    let count = 0;
+    const h = await commitHarness(async () => ++count <= 2
+      ? { ok: true, data: { projectId: 'one', operationId: 'op_fixed-test-operation', status: 'completed', commitOid: 'a'.repeat(40), branch: 'main' } }
+      : { ok: false, data: { error: { code: 'NETWORK_ERROR' } } });
+    h.run('loadRealProject = async () => false');
+    await h.run('confirmRealCommit()');
+    assert.equal(h.run('commitView.refreshError'), true);
+    await h.run('queryRealCommit(commitView)');
+    assert.equal(h.run('commitView.result.commitOid'), 'a'.repeat(40));
+    assert.equal(h.run('commitView.result.status'), 'completed');
+  });
+});
+
+
+describe('P3-T04 R01: partial 精确暂存清单', () => {
+  test('混合选择只展示服务器证实的 new.txt，不从选择推断 base.txt', async () => {
+    const h = await commitHarness(async () => ({ ok: false, data: { projectId: 'one', operationId: 'op_fixed-test-operation', status: 'partial', stagedFiles: ['new.txt'], indexChange: 'selected_only' } }));
+    h.run("commitView.selected = new Set(['base.txt', 'new.txt']);");
+    await h.run('confirmRealCommit()');
+    const html = h.controls.get('#commit-dialog-body').innerHTML;
+    assert.ok(html.includes('id="proven-staged-files"'));
+    assert.ok(html.includes('<code>new.txt</code>'));
+    assert.ok(!html.includes('base.txt'));
+    assert.ok(!html.includes('本地提交已完成（服务器已核实）'));
+  });
+  test('证实路径必须转义；unknown 后不显示历史 partial 清单', async () => {
+    let query = 0;
+    const h = await commitHarness(async url => ({ ok: false, data: url.endsWith('/confirm') || ++query === 1
+      ? { projectId: 'one', operationId: 'op_fixed-test-operation', status: 'partial', stagedFiles: ['<img src=x onerror=alert(1)>.txt'], indexChange: 'selected_only' }
+      : { projectId: 'one', operationId: 'op_fixed-test-operation', status: 'unknown' } }));
+    await h.run('confirmRealCommit()');
+    let html = h.controls.get('#commit-dialog-body').innerHTML;
+    assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;.txt'));
+    assert.ok(!html.includes('<img'));
+    await h.run('queryRealCommit(commitView)');
+    html = h.controls.get('#commit-dialog-body').innerHTML;
+    assert.ok(html.includes('结果未知'));
+    assert.ok(!html.includes('proven-staged-files'));
+    assert.ok(!html.includes('onerror'));
+  });
+  test('重新查询断线不把旧 partial 文件当成当前已核实清单', async () => {
+    let query = 0;
+    const h = await commitHarness(async url => url.endsWith('/confirm') || ++query === 1
+      ? { ok: false, data: { projectId: 'one', operationId: 'op_fixed-test-operation', status: 'partial', stagedFiles: ['new.txt'] } }
+      : { ok: false, data: { error: { code: 'NETWORK_ERROR' } } });
+    await h.run('confirmRealCommit()');
+    await h.run('queryRealCommit(commitView)');
+    assert.equal(h.run('commitView.result.status'), 'unknown');
+    assert.ok(!h.controls.get('#commit-dialog-body').innerHTML.includes('proven-staged-files'));
+  });
+});

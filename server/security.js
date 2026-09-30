@@ -34,7 +34,7 @@ export function validateRequestSecurity(req, actualPort) {
   }
 
   if (!rawHostValue || typeof rawHostValue !== 'string' || rawHostValue.toLowerCase() !== expectedHost) {
-    throw new SecurityError(`非法或不匹配的 Host: "${rawHostValue}"`, 403, 'HOST_FORBIDDEN');
+    throw new SecurityError('非法或不匹配的 Host', 403, 'HOST_FORBIDDEN');
   }
 
   // 2. Sec-Fetch-Site 校验：跨站请求一律拒绝
@@ -48,7 +48,7 @@ export function validateRequestSecurity(req, actualPort) {
   if (origin !== undefined) {
     // 带有 Origin 头时，必须严格等于 expectedOrigin，null 与外域均拒绝
     if (typeof origin !== 'string' || origin.toLowerCase() !== expectedOrigin) {
-      throw new SecurityError(`非法 Origin: "${origin}"`, 403, 'ORIGIN_FORBIDDEN');
+      throw new SecurityError('非法 Origin', 403, 'ORIGIN_FORBIDDEN');
     }
   }
 }

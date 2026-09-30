@@ -377,8 +377,8 @@ function showHelpContent(name) {
     'compat-help': ['先确定当前版本，再选择升级目标', '在兼容表中找到当前版本。只有明确列为支持的版本才有直接升级声明；还要核对验证状态、系统和材料完整性。未列出、待确认或中间步骤未验证的情况，需要进一步确认。'],
     'guide': isRealMode
       ? [
-          '看懂真实只读工作台状态',
-          '源码：工作区统计未提交文件；本地/远端仅根据本地跟踪引用快照计算领先与落后，未联网核实。25 格仅分级提醒数量，非容量上限。安装包/升级包：当前仍为模拟演示，尚未关联真实产物。本工具绝不修改被管理仓库。',
+          '看懂真实本地工作台状态',
+          '源码：工作区统计未提交文件；本地/远端仅根据本地跟踪引用快照计算领先与落后，未联网核实。25 格仅分级提醒数量，非容量上限。安装包/升级包：只读扫描已关联材料，登记的验证结论不等于本次核验。源码查看默认只读；只有选择文件、核对预览并明确确认后才会本地提交，不会推送或联网。',
         ]
       : [
           '看懂版本与材料状态',
@@ -429,8 +429,8 @@ async function apiFetch(url, options = {}) {
 async function initRealMode() {
   state = { view: 'source', selectedInstaller: 'i15', selectedUpgrade: 'u15' };
   $('#reset').style.display = 'none';
-  $('#sidebar-foot').innerHTML = `<span class="dot"></span> <span>真实只读模式</span><small>本地 Git 快照 · 零外部网络</small>`;
-  $('#demo-banner').innerHTML = '<strong>真实只读工作台</strong><span>本地 Git 只读状态；接入确认后只保存本工具配置。</span>';
+  $('#sidebar-foot').innerHTML = `<span class="dot"></span> <span>真实本地模式</span><small>本地 Git 快照 · 零外部网络</small>`;
+  $('#demo-banner').innerHTML = '<strong>真实本地工作台</strong><span>查看默认只读；本人确认后可提交选中文件，仅保存到本地。</span>';
   $('#demo-banner').classList.add('real-banner');
   $('#project-selector-wrapper').style.display = 'flex';
   $('#btn-refresh-real').style.display = 'inline-block';
@@ -439,6 +439,7 @@ async function initRealMode() {
 }
 
 async function reloadProjectsList(selectId = null) {
+  closeCommitDialog();
   const listSerial = ++realActiveRequestSerial; // 配置列表重载时废弃尚未完成的旧项目读取
   ++realActiveMaterialSerial; // 同时废弃旧材料清单请求
   currentProjectData = null;
@@ -560,7 +561,7 @@ function renderReal() {
 
   if (state.view === 'source') {
     $('#demo-banner').className = 'demo-banner real-banner';
-    $('#demo-banner').innerHTML = `<strong>真实只读工作台</strong><span>本地 Git 只读状态，所有已有历史、未提交文件与未推送提交均保留在本地；零写操作、零外部网络。</span>`;
+    $('#demo-banner').innerHTML = `<strong>真实本地工作台</strong><span>查看默认只读；选择文件、预览并确认后可本地提交。本批无推送、拉取或分支写操作。</span>`;
     $('#help-text').textContent = '只读工作台展示本地真实 Git 状态；未提交按变更文件统计，上游差异按领先/落后提交统计。';
     if (!currentProjectData) {
       if (currentProjectId) {
@@ -1330,6 +1331,202 @@ function renderMaterialDialog() {
   }
 }
 
+// Selected-files local commit. Tickets live only in this view; operation IDs survive navigation.
+let commitView = null;
+let commitSerial = 0;
+const commitOperationKey = (projectId) => `lvm_commit_operation_v1:${projectId}`;
+const commitKinds = { add: '新增', modify: '修改', delete: '删除', rename: '重命名', typechange: '类型变化' };
+const commitScopes = { staged: '已暂存', unstaged: '未暂存', untracked: '未跟踪（新增）', both: '已暂存 + 未暂存' };
+const commitReasons = {
+  IDENTITY_MISSING: '请先在本地 Git 配置提交者姓名和邮箱。',
+  SIGNING_UNSUPPORTED: '当前提交签名配置不受支持；本工具不会自动更改配置。',
+  HOOKS_UNSUPPORTED: '当前仓库 hooks 配置不受支持；本工具不会跳过或修改 hooks。',
+  GIT_CONFLICT: '仓库存在未解决冲突，请先在本地 Git 解决后再预览。',
+  HEAD_DETACHED: '当前未在普通分支上，暂不支持本地提交。',
+  HEAD_UNBORN: '当前仓库尚无初始提交，本批暂不支持。',
+  GIT_MERGING: '仓库正在合并，请先在本地 Git 完成或处理。',
+  GIT_REBASING: '仓库正在变基，请先在本地 Git 完成或处理。',
+  GIT_CHERRY_PICKING: '仓库正在挑选提交，请先在本地 Git 完成或处理。',
+  GIT_REVERTING: '仓库正在撤销提交，请先在本地 Git 完成或处理。',
+  FSMONITOR_UNSUPPORTED: '仓库文件监控配置暂不受支持，本工具不会更改配置。',
+  FILTER_UNSUPPORTED: '仓库内容过滤器配置暂不受支持，本工具不会更改配置。',
+  SPARSE_CHECKOUT_UNSUPPORTED: '仓库稀疏检出配置暂不受支持，本工具不会更改配置。',
+  SUBMODULE_UNSUPPORTED: '本批不支持提交子模块，请在本地 Git 中处理。',
+  PREVIEW_STALE: '预览已失效，请重新读取文件并预览。',
+  OPERATION_NOT_FOUND: '未找到原操作记录，无法据此判断是否发生写入；请核对仓库。',
+};
+function savedCommitOperation(projectId) {
+  try {
+    const value = localStorage.getItem(commitOperationKey(projectId));
+    return value && /^[a-zA-Z0-9_-]{1,64}$/.test(value) ? value : null;
+  } catch { return null; }
+}
+function commitCurrent(view) {
+  return commitView === view && view.serial === commitSerial && view.projectId === currentProjectId;
+}
+function closeCommitDialog() {
+  ++commitSerial;
+  commitView = null;
+  $('#commit-dialog').close();
+}
+async function commitRequest(view, action, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    return await apiFetch(`/api/projects/${encodeURIComponent(view.projectId)}/commit/${action}`, {
+      signal: controller.signal,
+      ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Local-Intent': 'git-commit' }, body: JSON.stringify(body) } : {}),
+    });
+  } finally { clearTimeout(timer); }
+}
+function commitError(response) {
+  const error = response.data?.error;
+  return `${commitReasons[error?.code] || error?.message || '服务响应不可用，请重新读取。'}${error?.code ? ` (${error.code})` : ''}`;
+}
+function commitFileList(files) {
+  return `<ul class="commit-files">${files.map((file) => `<li><span>${escapeHtml(commitKinds[file.operationType] || file.operationType || '')}</span> <code>${file.oldPath ? `${escapeHtml(file.oldPath)} → ` : ''}${escapeHtml(file.path)}</code></li>`).join('')}</ul>`;
+}
+function renderCommitDialog() {
+  const view = commitView;
+  if (!view || !commitCurrent(view)) return;
+  const project = realProjects.find((item) => item.id === view.projectId);
+  let body = `<p><strong>${escapeHtml(project?.name || view.projectId)}</strong> · 项目 ${escapeHtml(view.projectId)}</p><p class="caption">仅本地提交，不会推送或联网。未选择的已暂存工作会保留。</p>`;
+  if (view.phase === 'files') {
+    body += `<p>逐项选择这次要保存的文件。已暂存表示 Git 已准备保存的改动；不会默认选中任何文件。</p>
+      <div class="commit-candidates">${(view.candidates || []).map((file) => `<label class="commit-candidate"><input type="checkbox" data-commit-candidate="${escapeHtml(file.id)}" ${view.selected.has(file.id) ? 'checked' : ''} ${!file.selectable || view.busy ? 'disabled' : ''}><span><code>${file.oldPath ? `${escapeHtml(file.oldPath)} → ` : ''}${escapeHtml(file.path)}</code><small>${escapeHtml(commitKinds[file.operationType] || file.operationType)} · ${escapeHtml(commitScopes[file.stageScope] || file.stageScope)}${file.unselectableReason ? ` · ${escapeHtml(file.unselectableReason)}` : ''}</small></span></label>`).join('') || '<p>没有可提交的文件变更。</p>'}</div>
+      <label class="commit-message-label" for="real-commit-message">一句话说明这次修改</label><input id="real-commit-message" type="text" maxlength="500" value="${escapeHtml(view.message)}" ${view.busy ? 'disabled' : ''} autocomplete="off">
+      <p id="real-commit-validation" class="caption">已选择 ${view.selected.size} 项；提交说明需为 1–500 字单行文本。</p>
+      <button id="preview-real-commit" class="button primary" ${view.busy || !view.selected.size || !validCommitMessage(view.message) ? 'disabled' : ''}>${view.busy ? '正在核实预览…' : '预览本地提交'}</button>`;
+  } else if (view.phase === 'preview') {
+    const preview = view.preview;
+    body += `<div class="state-notice">服务器已核实项目 ${escapeHtml(preview.projectId)} · 分支 ${escapeHtml(preview.branch)}</div><p>提交说明：${escapeHtml(preview.message)}</p><h3>实际提交范围：${Number(preview.summary.fileCount)} 项</h3>${commitFileList(preview.summary.operations)}<p class="caption">以上为服务器提供的文件级摘要，不含逐行差异。重命名旧/新路径作为一项保存。预览约 ${Number(preview.expiresInSeconds)} 秒内有效；文件或配置改变后必须重新预览。</p>
+      <button id="confirm-real-commit" class="button primary" ${view.busy ? 'disabled' : ''}>${view.busy ? '正在确认并核对结果…' : '确认本地提交'}</button>`;
+  } else if (view.phase === 'result') {
+    const result = view.result || { status: 'unknown' };
+    const completed = result.status === 'completed' && /^[a-f0-9]{40,64}$/.test(result.commitOid || '');
+    const titles = { partial: '部分完成，需要核对', unknown: '结果未知，需要核对', busy: '操作处理中，需要查询', stale: '预览已失效', not_started: '已核实未开始提交' };
+    body += `<div class="state-notice ${completed ? 'good' : ''}"><strong>${completed ? '本地提交已完成（服务器已核实）' : titles[result.status] || '结果未知，需要核对'}</strong></div>`;
+    if (completed) body += `<p>分支：${escapeHtml(result.branch)}</p><p class="commit-oid">提交 OID：<code>${escapeHtml(result.commitOid)}</code></p>`;
+    else if (result.status === 'partial') {
+      body += '<p>服务器已核实当前提交指针未改变，以下仅列出本次操作已证实发生暂存变化的文件；这不是已完成提交。</p>';
+      const stagedFiles = Array.isArray(result.stagedFiles) && result.stagedFiles.length > 0 && result.stagedFiles.every((file) => typeof file === 'string') ? result.stagedFiles : null;
+      body += stagedFiles ? `<ul id="proven-staged-files" class="commit-files">${stagedFiles.map((file) => `<li><code>${escapeHtml(file)}</code></li>`).join('')}</ul>` : '<p>服务器未提供可核实的具体文件清单，请核对本地状态；不能从所选文件推断已暂存文件。</p>';
+    }
+    else if (result.status === 'stale') body += '<p>本次预览不能再确认。请重新读取候选文件并生成新预览。</p>';
+    else if (result.status === 'not_started') body += '<p>服务器未检测到本次提交或暂存变化。若仍要提交，请重新选择并预览。</p>';
+    else body += '<p>不能判断这次是否已写入。请查询原操作，必要时在本地 Git 核对；不要再次提交或另建操作重试。</p>';
+    const indexFacts = { unchanged: '已核实暂存区未改变', metadata_only: '已核实暂存内容未改变，仅元数据变化', selected_only: '已核实暂存变化仅在选中范围，未选暂存内容保持', unselected_changed: '检测到未选暂存范围变化，需要核对', unknown: '暂存区变化尚未核实' };
+    if (result.indexChange) body += `<p>${escapeHtml(indexFacts[result.indexChange] || indexFacts.unknown)}</p>`;
+    body += `<p class="caption commit-oid">操作 ID：${escapeHtml(view.operationId || '')}</p><p class="caption">仅支持服务进程崩溃后的结果核对，不保证操作系统崩溃或断电恢复。</p>
+      <button id="query-real-commit" class="button" ${view.busy ? 'disabled' : ''}>${view.busy ? '正在查询原操作…' : '查询原操作结果'}</button>
+      ${completed || ['stale', 'not_started'].includes(result.status) ? '<button id="new-real-commit" class="button">重新选择文件</button>' : ''}
+      <button id="refresh-commit-source" class="button">刷新真实状态与历史</button>`;
+  } else body += '<p>正在读取服务器候选文件…</p>';
+  if (view.error) body += `<p class="error-box" role="alert">${escapeHtml(view.error)}</p>`;
+  if (view.refreshError) body += '<p class="error-box">操作结果已保留，但状态/历史刷新失败。请点击“刷新真实状态与历史”。</p>';
+  if (view.phase === 'loading' && !view.busy) body += '<button id="retry-commit-candidates" class="button">重试读取候选文件</button>';
+  body += `<div class="actions"><button id="cancel-real-commit" class="button">${view.operationId ? '关闭（保留原操作查询）' : '取消，不提交'}</button></div>`;
+  $('#commit-dialog-body').innerHTML = body;
+}
+function validCommitMessage(message) {
+  return typeof message === 'string' && message.trim().length > 0 && message.length <= 500 && !/[\x00-\x1f\x7f]/.test(message);
+}
+async function openRealCommit({ fresh = false } = {}) {
+  if (!isRealMode || !currentProjectId) return;
+  const view = { projectId: currentProjectId, serial: ++commitSerial, phase: 'loading', selected: new Set(), message: '', busy: true };
+  commitView = view;
+  view.operationId = fresh ? null : savedCommitOperation(view.projectId);
+  if (!$('#commit-dialog').open) $('#commit-dialog').showModal();
+  if (view.operationId) {
+    view.phase = 'result';
+    view.busy = false;
+    await queryRealCommit(view);
+    return;
+  }
+  renderCommitDialog();
+  const response = await commitRequest(view, 'candidates');
+  if (!commitCurrent(view)) return;
+  view.busy = false;
+  if (!response.ok || response.data?.projectId !== view.projectId || !Array.isArray(response.data?.candidates)) view.error = commitError(response);
+  else { view.phase = 'files'; view.candidates = response.data.candidates; }
+  renderCommitDialog();
+}
+async function previewRealCommit() {
+  const view = commitView;
+  if (!view || view.busy || view.phase !== 'files' || !view.selected.size || !validCommitMessage(view.message)) return;
+  view.busy = true; view.error = null;
+  renderCommitDialog();
+  const response = await commitRequest(view, 'preview', { candidateIds: [...view.selected], message: view.message });
+  if (!commitCurrent(view)) return;
+  view.busy = false;
+  if (!response.ok || response.data?.projectId !== view.projectId || !response.data?.ticketId) view.error = commitError(response);
+  else { view.phase = 'preview'; view.preview = response.data; }
+  renderCommitDialog();
+}
+async function refreshCommitSource(view) {
+  if (!commitCurrent(view)) return;
+  const ok = await loadRealProject(view.projectId);
+  if (!commitCurrent(view)) return;
+  view.refreshError = !ok;
+  renderCommitDialog();
+}
+async function queryRealCommit(view, confirmation = null) {
+  if (!commitCurrent(view) || !view.operationId || view.busy) return;
+  view.busy = true; view.phase = 'result'; view.error = null;
+  renderCommitDialog();
+  const response = await commitRequest(view, `operations/${encodeURIComponent(view.operationId)}`);
+  if (!commitCurrent(view)) return;
+  view.busy = false;
+  const result = response.data;
+  if (result?.projectId === view.projectId && result.operationId === view.operationId && result.status) {
+    view.result = result;
+  } else if (confirmation?.status === 'stale' && confirmation.operationId === view.operationId && response.data?.error?.code === 'OPERATION_NOT_FOUND') {
+    view.result = { status: 'stale' };
+    // Confirm explicitly rejected the ticket before a write and read found no operation.
+    // Do not strand a cancelled stale ticket across navigation.
+    try { if (savedCommitOperation(view.projectId) === view.operationId) localStorage.removeItem(commitOperationKey(view.projectId)); } catch {}
+  } else {
+    // Keep a verified completed commit, but do not present old partial paths as current facts.
+    if (view.result?.status !== 'completed') view.result = { status: 'unknown' };
+    view.error = commitError(response);
+  }
+  renderCommitDialog();
+  await refreshCommitSource(view);
+}
+async function confirmRealCommit() {
+  const view = commitView;
+  if (!view || view.busy || view.phase !== 'preview') return;
+  const operationId = `op_${crypto.randomUUID()}`;
+  try {
+    localStorage.setItem(commitOperationKey(view.projectId), operationId);
+    if (savedCommitOperation(view.projectId) !== operationId) throw new Error('storage');
+  } catch {
+    view.error = '无法保存操作 ID，未发送提交。请允许本站本地存储后重新预览。';
+    renderCommitDialog(); return;
+  }
+  view.operationId = operationId;
+  view.busy = true;
+  const ticketId = view.preview.ticketId;
+  renderCommitDialog();
+  const response = await commitRequest(view, 'confirm', { ticketId, operationId });
+  // Even if the dialog closes, the original operation ID remains available for read-only recovery.
+  if (!commitCurrent(view)) return;
+  view.preview = null; view.busy = false; view.phase = 'result';
+  await queryRealCommit(view, response.data);
+}
+$('#commit-dialog')?.addEventListener('cancel', () => { ++commitSerial; commitView = null; });
+$('#commit-dialog')?.addEventListener('change', (event) => {
+  const id = event.target.dataset.commitCandidate;
+  if (!id || !commitView || commitView.busy || commitView.phase !== 'files') return;
+  if (event.target.checked) commitView.selected.add(id); else commitView.selected.delete(id);
+  renderCommitDialog();
+});
+$('#commit-dialog')?.addEventListener('input', (event) => {
+  if (event.target.id !== 'real-commit-message' || !commitView || commitView.busy) return;
+  commitView.message = event.target.value;
+  $('#preview-real-commit').disabled = !commitView.selected.size || !validCommitMessage(commitView.message);
+});
+
 function realSourcePage() {
   const current = realProjects.find((p) => p.id === currentProjectId);
   const { source, history } = currentProjectData;
@@ -1387,7 +1584,7 @@ function realSourcePage() {
   return `
     ${heading(
       `${escapeHtml(current?.name || '')} · 源码工作台`,
-      `本地只读扫描时间：${new Date(source.scannedAt).toLocaleTimeString()}（不执行任何 Git 写操作）`
+      `本地只读扫描时间：${new Date(source.scannedAt).toLocaleTimeString()}（查看状态只读）`
     )}
     <div class="source-top">
       <section class="panel">
@@ -1445,6 +1642,7 @@ function realSourcePage() {
         </div>
         <div class="sync-summary">${syncSummaryHtml}</div>
         <div class="actions">
+          <button id="open-real-commit" class="button primary">选择文件并本地提交</button>
           <button class="button" data-action="real-files">查看改动 (${count})</button>
           <button class="button primary" data-action="real-refresh">刷新状态 ↻</button>
         </div>
@@ -1868,6 +2066,7 @@ document.addEventListener('click', (event) => {
 
   // 视图切换
   if (button.dataset.view) {
+    if (isRealMode) closeCommitDialog();
     state.view = button.dataset.view;
     if (isRealMode) renderReal();
     else renderDemo();
@@ -1898,6 +2097,13 @@ document.addEventListener('click', (event) => {
 
   // 真实模式专属操作
   if (isRealMode) {
+    if (button.id === 'open-real-commit' || button.id === 'retry-commit-candidates') { void openRealCommit(); return; }
+    if (button.id === 'preview-real-commit') { void previewRealCommit(); return; }
+    if (button.id === 'confirm-real-commit') { void confirmRealCommit(); return; }
+    if (button.id === 'cancel-real-commit') { closeCommitDialog(); return; }
+    if (button.id === 'query-real-commit') { void queryRealCommit(commitView); return; }
+    if (button.id === 'refresh-commit-source') { void refreshCommitSource(commitView); return; }
+    if (button.id === 'new-real-commit' && !commitView?.busy && ['completed', 'stale', 'not_started'].includes(commitView?.result?.status)) { void openRealCommit({ fresh: true }); return; }
     // 材料条目选择
     if (button.dataset.materialItem !== undefined) {
       selectedMaterialItemId = button.dataset.materialItem;
@@ -1991,6 +2197,9 @@ document.addEventListener('click', (event) => {
 $('#project-select')?.addEventListener('change', (e) => {
   const newId = e.target.value;
   if (!newId || newId === currentProjectId) return;
+  closeCommitDialog();
+  ++realActiveRequestSerial;
+  ++realActiveMaterialSerial;
   currentProjectId = newId;
   sessionStorage.setItem('selected_project_id', currentProjectId);
   updateTopbarBreadcrumb();

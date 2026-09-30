@@ -1,6 +1,6 @@
 import http from 'node:http';
 import path from 'node:path';
-import { loadProjectsConfig, confirmAndSaveProject, confirmAndSaveMaterialAssociation, ConfigError } from './config.js';
+import { loadProjectsConfig, confirmAndSaveProject, confirmAndSaveMaterialAssociation, acquireConfigLock, releaseConfigLock, ConfigError } from './config.js';
 import { validateRequestSecurity, validateAndParseJsonPost, SecurityError } from './security.js';
 import { isStaticPath, serveStatic } from './static.js';
 import { getRepositorySource } from './git/status.js';
@@ -9,6 +9,49 @@ import { inspectRepository, getInspectionTicket, verifyRepositoryIdentity } from
 import { inspectMaterialDirectory, getMaterialInspectionTicket, verifyMaterialDirectoryIdentity, MaterialError } from './materials/association.js';
 import { scanMaterialDirectory, generateScanPreviewSummary } from './materials/scan.js';
 import { GitError } from './git/exec.js';
+import { getCommitCandidates, createCommitPreview, removeCommitPreviewTicket, COMMIT_PREVIEW_ERRORS } from './git/commit-preview.js';
+import { executeCommit, queryCommitOperation, COMMIT_WRITE_ERRORS } from './git/commit-write.js';
+import { COMMIT_OPERATION_ERRORS } from './git/commit-operations.js';
+
+const COMMIT_CODES = new Set([...Object.keys(COMMIT_PREVIEW_ERRORS), ...Object.keys(COMMIT_WRITE_ERRORS),
+  ...Object.keys(COMMIT_OPERATION_ERRORS), 'PROJECT_NOT_FOUND', 'CONFIG_INVALID', 'CONFIG_BUSY', 'CONFIG_SAVE_FAILED', 'GIT_TIMEOUT', 'GIT_OUTPUT_LIMIT', 'GIT_UNAVAILABLE']);
+const operationIdPattern = /^[a-zA-Z0-9_-]{1,64}$/;
+function validCommitBody(body, action) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const keys = action === 'preview' ? ['candidateIds', 'message'] : ['ticketId', 'operationId'];
+  if (Object.keys(body).length !== 2 || Object.keys(body).some((key) => !keys.includes(key))) return false;
+  if (action === 'confirm') return typeof body.ticketId === 'string' && /^[a-f0-9]{64}$/.test(body.ticketId) &&
+    typeof body.operationId === 'string' && operationIdPattern.test(body.operationId);
+  return typeof body.message === 'string' && body.message.length <= 500 && body.message.trim().length > 0 &&
+    !/[\x00-\x1f\x7f]/.test(body.message) && Array.isArray(body.candidateIds) &&
+    body.candidateIds.length > 0 && body.candidateIds.length <= 500 &&
+    body.candidateIds.every((id) => typeof id === 'string' && /^cand_[a-f0-9]{16}$/.test(id)) &&
+    new Set(body.candidateIds).size === body.candidateIds.length;
+}
+// Explicit transport DTO: never serialize core internals or exception messages.
+function commitResultDto(projectId, result) {
+  const output = { projectId };
+  for (const key of ['success', 'status', 'operationId', 'reason', 'commitOid', 'treeOid', 'branch',
+    'message', 'indexChange', 'idempotent', 'durable', 'retired', 'blockedByOperationId', 'persistenceGuarantee']) {
+    if (result[key] !== undefined) output[key] = result[key];
+  }
+  // T02 emits this complete delta only after proving partial against the current
+  // index. Never reconstruct it from the selection or expose stale/invalid paths.
+  if (result.status === 'partial' && Array.isArray(result.stagedFiles) && result.stagedFiles.length > 0 &&
+      new Set(result.stagedFiles).size === result.stagedFiles.length && result.stagedFiles.every((name) => {
+        if (typeof name !== 'string' || !name || name.includes('\0') || path.isAbsolute(name)) return false;
+        if (process.platform === 'win32' && /^[a-zA-Z]:/.test(name)) return false;
+        return !name.split(process.platform === 'win32' ? /[\\/]/ : '/').some((part) => part === '.' || part === '..');
+      })) output.stagedFiles = [...result.stagedFiles];
+  output.resultUrl = `/api/projects/${projectId}/commit/operations/${result.operationId}`;
+  output.sourceUrl = `/api/projects/${projectId}/source`;
+  if (result.status !== 'completed') output.error = {
+    code: result.reason || 'COMMIT_UNKNOWN',
+    message: result.status === 'stale' ? '预览已失效，请重新预览' : result.message || '请先查询并核对提交操作状态',
+  };
+  return output;
+}
+
 
 const MAX_SERIALIZED_RESPONSE_BYTES = 8 * 1024 * 1024; // 8 MiB
 
@@ -70,10 +113,13 @@ function handlePostSecurityError(err, req, res) {
  * @param {object} options
  * @param {string} [options.configPath]
  * @param {string} [options.frontendDir]
+ * @param {string} [options.operationsDir] Trusted absolute operation-store path; defaults beside config.
  * @param {() => number} options.getPort
  */
-export function createRequestHandler({ configPath, frontendDir, getPort }) {
-  const resolvedConfigPath = configPath || path.resolve('.local/projects.json');
+export function createRequestHandler({ configPath, frontendDir, operationsDir, getPort }) {
+  const resolvedConfigPath = path.resolve(configPath || '.local/projects.json');
+  const commitOptions = { configPath: resolvedConfigPath, operationsDir: operationsDir || path.join(path.dirname(resolvedConfigPath), 'commit-operations') };
+  const configLockPath = path.join(path.dirname(resolvedConfigPath), path.basename(resolvedConfigPath, path.extname(resolvedConfigPath)) + '.lock');
   const resolvedFrontendDir = frontendDir || path.resolve('frontend');
 
   return async function requestHandler(req, res) {
@@ -121,6 +167,89 @@ export function createRequestHandler({ configPath, frontendDir, getPort }) {
     // 3. 静态白名单匹配
     if (isStaticPath(pathname)) {
       await serveStatic(req, res, pathname, resolvedFrontendDir);
+      return;
+    }
+
+    // Commit routes are closed before any config lookup, lock, ticket or Git work.
+    const commitMatch = pathname.match(/^\/api\/projects\/([a-z][a-z0-9_-]{0,31})\/commit\/(candidates|preview|confirm|operations\/([a-zA-Z0-9_-]{1,64}))$/);
+    if (commitMatch) {
+      const [, projectId, action, operationId] = commitMatch;
+      const expectedMethod = action === 'preview' || action === 'confirm' ? 'POST' : 'GET';
+      if (req.method !== expectedMethod) {
+        req.resume();
+        sendJson(res, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: '此提交接口不支持该方法' } }, { Allow: expectedMethod });
+        return;
+      }
+      if (new URL(req.url, `http://127.0.0.1:${actualPort}`).search) {
+        req.resume();
+        sendJson(res, 400, { error: { code: 'INVALID_INPUT', message: '提交接口不接受查询参数' } });
+        return;
+      }
+      let body;
+      if (expectedMethod === 'POST') {
+        try {
+          if (req.headers.origin !== `http://127.0.0.1:${actualPort}`) throw new SecurityError('提交请求必须携带精确同源 Origin', 403, 'ORIGIN_FORBIDDEN');
+          body = await validateAndParseJsonPost(req, actualPort, 'git-commit');
+        } catch (err) { handlePostSecurityError(err, req, res); return; }
+        if (!validCommitBody(body, action)) {
+          sendJson(res, 400, { error: { code: 'INVALID_INPUT', message: '提交请求字段、类型或长度不合法' } });
+          return;
+        }
+      }
+      let locked = false;
+      let executing = false;
+      try {
+        // Serialize with registration/material config writers. GET never takes a lock.
+        if (expectedMethod === 'POST') { await acquireConfigLock(configLockPath); locked = true; }
+        const config = await loadProjectsConfig(resolvedConfigPath);
+        const project = config.projectMap.get(projectId);
+        if (!project) throw new GitError('PROJECT_NOT_FOUND', '未找到项目', 404);
+        let output;
+        let statusCode = 200;
+        if (action === 'candidates') {
+          output = { projectId, ...await getCommitCandidates(project.repositoryPath, { projectId }) };
+        } else if (action === 'preview') {
+          const preview = await createCommitPreview(project.repositoryPath, { ...body, projectId });
+          const latest = await loadProjectsConfig(resolvedConfigPath);
+          if (latest.projectMap.get(projectId)?.repositoryPath !== project.repositoryPath) {
+            removeCommitPreviewTicket(preview.ticketId);
+            throw new GitError('PREVIEW_STALE', '项目配置已改变', 409);
+          }
+          // No file contents/diff are returned by the HTTP boundary.
+          const { ticketId, branch, headOid, expectedTreeOid, message, summary, expiresInSeconds } = preview;
+          output = { projectId, ticketId, branch, headOid, expectedTreeOid, message, summary, expiresInSeconds };
+        } else {
+          executing = action === 'confirm';
+          const result = executing ? await executeCommit(projectId, body, commitOptions) :
+            await queryCommitOperation(projectId, operationId, commitOptions);
+          output = commitResultDto(projectId, result);
+          statusCode = result.status === 'completed' ? 200 : 409;
+        }
+        if (expectedMethod === 'GET') {
+          const latest = await loadProjectsConfig(resolvedConfigPath);
+          if (latest.projectMap.get(projectId)?.repositoryPath !== project.repositoryPath) throw new GitError('OPERATION_INVALID', '项目配置已改变', 409);
+        }
+        sendJson(res, statusCode, output);
+      } catch (err) {
+        const code = COMMIT_CODES.has(err.code) ? err.code : err instanceof ConfigError ? 'CONFIG_INVALID' : 'COMMIT_UNKNOWN';
+        const statusCode = ['PROJECT_NOT_FOUND', 'OPERATION_NOT_FOUND'].includes(code) ? 404 :
+          code === 'GIT_TIMEOUT' ? 504 : code === 'GIT_UNAVAILABLE' || code === 'CONFIG_INVALID' ? 500 : 409;
+        const messages = { REPOSITORY_BUSY: '仓库忙，请稍后查询操作状态', PREVIEW_STALE: '预览已失效，请重新预览',
+          IDENTITY_MISSING: '请先在 Git 中配置提交身份', PROJECT_NOT_FOUND: '未找到已登记项目',
+          OPERATION_NOT_FOUND: '未找到该提交操作' };
+        // An unexpected confirmation exception can occur after a write. Never claim failure/not_started.
+        sendJson(res, statusCode, { error: { code, message: messages[code] || '提交请求无法安全完成，请核对配置或查询操作状态' },
+          ...(executing ? { status: code === 'REPOSITORY_BUSY' ? 'busy' : code === 'PREVIEW_STALE' ? 'stale' : 'unknown', operationId: body.operationId,
+            resultUrl: `/api/projects/${projectId}/commit/operations/${body.operationId}` } : {}) });
+      } finally {
+        if (locked) await releaseConfigLock(configLockPath);
+      }
+      return;
+    }
+
+    if (/^\/api\/projects\/[^/]+\/commit(?:\/|$)/.test(pathname)) {
+      req.resume();
+      sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '提交接口不存在' } });
       return;
     }
 
@@ -810,6 +939,7 @@ export function createRequestHandler({ configPath, frontendDir, getPort }) {
  * @param {number} [options.port]
  * @param {string} [options.configPath]
  * @param {string} [options.frontendDir]
+ * @param {string} [options.operationsDir] Trusted absolute operation-store path; defaults beside config.
  */
 export function createAppServer(options = {}) {
   let listeningPort = options.port || 4189;
@@ -817,6 +947,7 @@ export function createAppServer(options = {}) {
   const requestHandler = createRequestHandler({
     configPath: options.configPath,
     frontendDir: options.frontendDir,
+    operationsDir: options.operationsDir,
     getPort: () => listeningPort,
   });
 
